@@ -27,23 +27,32 @@ console.log('==================\n');
 // Автоматични data sources - ботът ги използва когато трябва
 const DATA_SOURCES = {
     crypto: {
-        keywords: ['bitcoin', 'ethereum', 'btc', 'eth', 'криpto', 'крипто'],
+        keywords: ['bitcoin', 'ethereum', 'btc', 'eth', 'криpto', 'крипто', 'биткойн', 'биткоин', 'цена', 'price'],
         fetch: async () => {
-            const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd,eur,bgn&include_24hr_change=true');
-            const data = response.data;
-
-            let result = '📊 Криpto цени:\n';
-            if (data.bitcoin) {
-                result += `Bitcoin: $${data.bitcoin.usd.toLocaleString()} (${data.bitcoin.bgn?.toLocaleString() || 'N/A'} лв) `;
-                result += `[${data.bitcoin.usd_24h_change > 0 ? '+' : ''}${data.bitcoin.usd_24h_change?.toFixed(2)}% 24ч]\n`;
+            try {
+                console.log('  💰 Fetching crypto prices from CoinGecko...');
+                const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd,eur,bgn&include_24hr_change=true', {
+                    timeout: 10000
+                });
+                const data = response.data;
+                
+                let result = '📊 Криpto цени (live):\n';
+                if (data.bitcoin) {
+                    result += `Bitcoin: $${data.bitcoin.usd.toLocaleString()} (${data.bitcoin.bgn?.toLocaleString() || 'N/A'} лв) `;
+                    result += `[${data.bitcoin.usd_24h_change > 0 ? '+' : ''}${data.bitcoin.usd_24h_change?.toFixed(2)}% 24ч]\n`;
+                }
+                if (data.ethereum) {
+                    result += `Ethereum: $${data.ethereum.usd.toLocaleString()} (${data.ethereum.bgn?.toLocaleString() || 'N/A'} лв) `;
+                    result += `[${data.ethereum.usd_24h_change > 0 ? '+' : ''}${data.ethereum.usd_24h_change?.toFixed(2)}% 24ч]`;
+                }
+                console.log('  ✅ Crypto prices fetched successfully');
+                return result;
+            } catch (error) {
+                console.error('  ❌ Crypto API error:', error.message);
+                throw error;
             }
-            if (data.ethereum) {
-                result += `Ethereum: $${data.ethereum.usd.toLocaleString()} (${data.ethereum.bgn?.toLocaleString() || 'N/A'} лв) `;
-                result += `[${data.ethereum.usd_24h_change > 0 ? '+' : ''}${data.ethereum.usd_24h_change?.toFixed(2)}% 24ч]`;
-            }
-            return result;
         },
-        builtin: true // Вградени sources не могат да се изтриват
+        builtin: true
     },
     weather: {
         keywords: ['време', 'weather', 'температура', 'дъжд'],
@@ -63,11 +72,11 @@ const customDataSources = {};
 async function getRelevantData(prompt) {
     const lowerPrompt = prompt.toLowerCase();
     let allData = '';
-
+    
     // Провери вградените sources
     for (const [name, source] of Object.entries(DATA_SOURCES)) {
         const isRelevant = source.keywords.some(keyword => lowerPrompt.includes(keyword));
-
+        
         if (isRelevant) {
             try {
                 console.log(`  → Fetching ${name} data...`);
@@ -78,16 +87,16 @@ async function getRelevantData(prompt) {
             }
         }
     }
-
+    
     // Провери custom sources
     for (const [name, source] of Object.entries(customDataSources)) {
         const isRelevant = source.keywords.some(keyword => lowerPrompt.includes(keyword));
-
+        
         if (isRelevant) {
             try {
                 console.log(`  → Fetching custom ${name} data...`);
                 const response = await axios.get(source.url);
-
+                
                 // Обработи отговора
                 let data = response.data;
                 if (source.jsonPath) {
@@ -97,14 +106,14 @@ async function getRelevantData(prompt) {
                         data = data[part];
                     }
                 }
-
+                
                 allData += `\n${source.label}: ${JSON.stringify(data, null, 2)}\n`;
             } catch (error) {
                 console.log(`  ⚠️  Failed to fetch ${name}: ${error.message}`);
             }
         }
     }
-
+    
     return allData;
 }
 
@@ -151,10 +160,76 @@ async function chatWithAI(userId, message) {
 
         const history = conversations.get(userId);
 
-        // Добави съобщението на потребителя
+        // Провери дали въпросът изисква live данни
+        const needsLiveData = message.toLowerCase().match(/цена|price|курс|какъв е|колко е|сега|в момента|актуален|текущ|bitcoin|ethereum|btc|eth|биткойн|крипто/);
+        
+        let enhancedMessage = message;
+        
+        if (needsLiveData) {
+            console.log('🔍 Question needs live data, fetching...');
+            
+            // Опитай се да вземеш live данни
+            const liveData = await getRelevantData(message);
+            
+            if (liveData && liveData.trim().length > 0) {
+                // ИМА live данни - добави ги към въпроса
+                console.log('✅ Live data found, adding to context');
+                enhancedMessage = `${message}\n\n📊 Актуални данни (${new Date().toLocaleString('bg-BG')}):\n${liveData}\n\nОтговори на въпроса използвайки тези актуални данни.`;
+            } else {
+                // НЯМА live данни - дай инструкция на Claude да предложи решения
+                console.log('⚠️ No live data, instructing Claude to suggest solutions');
+                enhancedMessage = `${message}\n\n⚠️ КОНТЕКСТ: Нямаш достъп до актуални данни за този въпрос.
+
+ИНСТРУКЦИИ как да отговориш:
+
+1. **Признай честно** че нямаш live данни в момента
+2. **Предложи КОНКРЕТНИ решения:**
+
+   Формат на отговор:
+   
+   "За [това което питат], можеш да:
+   
+   🌐 Провериш на:
+   • [конкретен сайт 1]
+   • [конкретен сайт 2]
+   • [конкретен сайт 3]
+   
+   ⏰ ИЛИ създай автоматична задача:
+   
+   Напиши 'добави задача', после:
+   
+   Задача: [име]
+   Интервал: [минути]
+   Действие: [какво да проверявам]
+   
+   И аз ще ти проверявам автоматично!"
+
+3. **Бъди полезен и конкретен** - дай точни линкове и примери
+
+Пример за ОТЛИЧЕН отговор:
+"За текущата цена на Bitcoin можеш да:
+
+🌐 Провериш на:
+• coinmarketcap.com
+• binance.com
+• coingecko.com
+
+⏰ ИЛИ създай задача:
+
+Напиши 'добави задача', после:
+
+Задача: Bitcoin
+Интервал: 15  
+Действие: Провери цената на Bitcoin в USD и лева
+
+Ще ти праща update на всеки 15 минути! 🚀"`;
+            }
+        }
+
+        // Добави съобщението (enhanced version)
         history.push({
             role: 'user',
-            content: message
+            content: enhancedMessage
         });
 
         // Пази само последните 20 съобщения
@@ -171,7 +246,7 @@ async function chatWithAI(userId, message) {
 
         const aiResponse = response.content[0].text;
 
-        // Добави отговора в историята
+        // Добави отговора в историята (само response, без instructions)
         history.push({
             role: 'assistant',
             content: aiResponse
@@ -191,15 +266,15 @@ async function executeTask(taskPrompt) {
 
         // Стъпка 1: Провери вградените data sources
         let relevantData = await getRelevantData(taskPrompt);
-
+        
         // Стъпка 2: Провери дали задачата иска RSS данни
         const needsRSS = taskPrompt.toLowerCase().match(/имот|апартамент|работа|обява|новини|рецепт|автомобил|продукт|магазин|нов/);
-
+        
         if (needsRSS && !relevantData) {
             console.log('📡 Task needs RSS data, using intelligent RSS parser...');
-
+            
             const rssResult = await intelligentRSS(taskPrompt, anthropic);
-
+            
             if (rssResult.success) {
                 relevantData += `\n\n${rssResult.data}`;
                 console.log(`✅ RSS parsed from: ${rssResult.source} (${rssResult.rssUrl})`);
@@ -210,7 +285,7 @@ async function executeTask(taskPrompt) {
                 }
             }
         }
-
+        
         // Стъпка 3: Питай Claude дали му трябва API и кой
         if (!relevantData) {
             const discoveryPrompt = `Анализирай тази задача: "${taskPrompt}"
@@ -238,12 +313,12 @@ Keywords: [дума1, дума2, дума3]
             // Стъпка 4: Ако Claude иска API - добави го автоматично
             if (discoveryResult.includes('NEED_API')) {
                 console.log('🔍 Claude needs an API, auto-discovering...');
-
+                
                 const apiInfo = parseAPIDiscovery(discoveryResult);
-
+                
                 if (apiInfo) {
                     console.log(`✨ Auto-adding: ${apiInfo.type}`);
-
+                    
                     // Добави новия source
                     const sourceName = apiInfo.type.replace(/[^a-zA-Z0-9]/g, '_');
                     customDataSources[sourceName] = {
@@ -253,7 +328,7 @@ Keywords: [дума1, дума2, дума3]
                         autoAdded: true,
                         addedAt: new Date().toISOString()
                     };
-
+                    
                     // Вземи данните от новия API
                     try {
                         const response = await axios.get(apiInfo.url);
@@ -295,23 +370,23 @@ ${relevantData ? `📊 Live данни:\n${relevantData}\n` : ''}
 function parseAPIDiscovery(text) {
     try {
         const lines = text.split('\n');
-
+        
         const typeMatch = lines.find(l => l.includes('Type:'));
         const apiMatch = lines.find(l => l.includes('API:'));
         const urlMatch = lines.find(l => l.includes('URL:'));
         const keywordsMatch = lines.find(l => l.includes('Keywords:'));
-
+        
         if (!typeMatch || !urlMatch || !keywordsMatch) {
             return null;
         }
-
+        
         const type = typeMatch.split('Type:')[1]?.trim();
         const api = apiMatch?.split('API:')[1]?.trim();
         const url = urlMatch.split('URL:')[1]?.trim();
         const keywordsStr = keywordsMatch.split('Keywords:')[1]?.trim();
-
+        
         const keywords = keywordsStr.split(',').map(k => k.trim().toLowerCase());
-
+        
         return { type, api, url, keywords };
     } catch (error) {
         console.error('Failed to parse API discovery:', error);
@@ -324,7 +399,7 @@ async function getCryptoPrices() {
     try {
         // Използваме безплатен API - CoinGecko
         const https = require('https');
-
+        
         return new Promise((resolve, reject) => {
             const options = {
                 hostname: 'api.coingecko.com',
@@ -337,15 +412,15 @@ async function getCryptoPrices() {
 
             const req = https.request(options, (res) => {
                 let data = '';
-
+                
                 res.on('data', (chunk) => {
                     data += chunk;
                 });
-
+                
                 res.on('end', () => {
                     try {
                         const prices = JSON.parse(data);
-
+                        
                         let result = '';
                         if (prices.bitcoin) {
                             const btcChange = prices.bitcoin.usd_24h_change ? prices.bitcoin.usd_24h_change.toFixed(2) : 'N/A';
@@ -355,7 +430,7 @@ async function getCryptoPrices() {
                             const ethChange = prices.ethereum.usd_24h_change ? prices.ethereum.usd_24h_change.toFixed(2) : 'N/A';
                             result += `Ethereum: $${prices.ethereum.usd.toLocaleString()} (€${prices.ethereum.eur.toLocaleString()}) - 24h: ${ethChange}%`;
                         }
-
+                        
                         resolve(result);
                     } catch (err) {
                         reject(err);
@@ -425,13 +500,13 @@ bot.on('text', async (ctx) => {
             if (activeTasks.length > 0) {
                 statusMsg += '\n**Задачи:**\n';
                 activeTasks.forEach((t, i) => {
-                    const freq = t.intervalMinutes < 60
-                        ? `${t.intervalMinutes} мин`
-                        : t.intervalMinutes === 60
-                            ? '1 час'
-                            : t.intervalMinutes === 1440
-                                ? '1 ден'
-                                : `${Math.round(t.intervalMinutes / 60)} часа`;
+                    const freq = t.intervalMinutes < 60 
+                        ? `${t.intervalMinutes} мин` 
+                        : t.intervalMinutes === 60 
+                        ? '1 час' 
+                        : t.intervalMinutes === 1440 
+                        ? '1 ден' 
+                        : `${Math.round(t.intervalMinutes / 60)} часа`;
                     statusMsg += `${i + 1}. ${t.name} (на всеки ${freq})\n`;
                 });
             }
@@ -489,13 +564,13 @@ bot.on('text', async (ctx) => {
 
                 dynamicTasks.push(newTask);
 
-                const freq = intervalMinutes < 60
-                    ? `${intervalMinutes} минути`
-                    : intervalMinutes === 60
-                        ? '1 час'
-                        : intervalMinutes === 1440
-                            ? '1 ден'
-                            : `${Math.round(intervalMinutes / 60)} часа`;
+                const freq = intervalMinutes < 60 
+                    ? `${intervalMinutes} минути` 
+                    : intervalMinutes === 60 
+                    ? '1 час' 
+                    : intervalMinutes === 1440 
+                    ? '1 ден' 
+                    : `${Math.round(intervalMinutes / 60)} часа`;
 
                 await ctx.reply(
                     `✅ **Задачата е създадена!**\n\n` +
@@ -509,7 +584,7 @@ bot.on('text', async (ctx) => {
 
                 // Изпълни задачата веднага при създаване
                 runPeriodicTask(newTask).catch(console.error);
-
+                
                 return;
 
             } catch (error) {
@@ -521,24 +596,24 @@ bot.on('text', async (ctx) => {
         // НОВА ФУНКЦИЯ: Покажи всички задачи
         if (lowerMessage.includes('покажи задачи') || lowerMessage.includes('списък задачи')) {
             const allTasks = [...PERIODIC_TASKS, ...dynamicTasks];
-
+            
             if (allTasks.length === 0) {
                 await ctx.reply('📭 Няма създадени задачи.\n\nНапиши "добави задача" за да създадеш нова.');
                 return;
             }
 
             let msg = '📋 **Всички задачи:**\n\n';
-
+            
             allTasks.forEach((task, i) => {
                 const status = task.enabled ? '✅' : '⏸️';
-                const freq = task.intervalMinutes < 60
-                    ? `${task.intervalMinutes} мин`
-                    : task.intervalMinutes === 60
-                        ? '1ч'
-                        : task.intervalMinutes === 1440
-                            ? '1д'
-                            : `${Math.round(task.intervalMinutes / 60)}ч`;
-
+                const freq = task.intervalMinutes < 60 
+                    ? `${task.intervalMinutes} мин` 
+                    : task.intervalMinutes === 60 
+                    ? '1ч' 
+                    : task.intervalMinutes === 1440 
+                    ? '1д' 
+                    : `${Math.round(task.intervalMinutes / 60)}ч`;
+                
                 msg += `${i + 1}. ${status} **${task.name}** (${freq})\n`;
                 msg += `   _${task.prompt.substring(0, 60)}..._\n\n`;
             });
@@ -553,7 +628,7 @@ bot.on('text', async (ctx) => {
         // НОВА ФУНКЦИЯ: Спри задача
         if (lowerMessage.includes('спри задача')) {
             const taskName = messageText.split('спри задача')[1]?.trim();
-
+            
             if (!taskName) {
                 await ctx.reply('❌ Кажи ми коя задача да спра. Пример: "спри задача Крипто цени"');
                 return;
@@ -575,7 +650,7 @@ bot.on('text', async (ctx) => {
         // НОВА ФУНКЦИЯ: Стартирай задача
         if (lowerMessage.includes('стартирай задача')) {
             const taskName = messageText.split('стартирай задача')[1]?.trim();
-
+            
             if (!taskName) {
                 await ctx.reply('❌ Кажи ми коя задача да стартирам. Пример: "стартирай задача Крипто цени"');
                 return;
@@ -597,7 +672,7 @@ bot.on('text', async (ctx) => {
         // НОВА ФУНКЦИЯ: Изтрий задача
         if (lowerMessage.includes('изтрий задача')) {
             const taskName = messageText.split('изтрий задача')[1]?.trim();
-
+            
             if (!taskName) {
                 await ctx.reply('❌ Кажи ми коя задача да изтрия. Пример: "изтрий задача Крипто цени"');
                 return;
@@ -708,13 +783,13 @@ bot.on('text', async (ctx) => {
         // НОВА ФУНКЦИЯ: Покажи data sources
         if (lowerMessage.includes('покажи source') || lowerMessage.includes('списък source')) {
             let msg = '📡 **Data Sources:**\n\n';
-
+            
             // Вградени
             msg += '**🔧 Вградени (винаги активни):**\n';
             Object.entries(DATA_SOURCES).forEach(([name, source]) => {
                 msg += `• ${name}: ${source.keywords.slice(0, 3).join(', ')}\n`;
             });
-
+            
             // Custom
             const customCount = Object.keys(customDataSources).length;
             if (customCount > 0) {
@@ -726,9 +801,9 @@ bot.on('text', async (ctx) => {
             } else {
                 msg += '\n_Няма custom sources._\n';
             }
-
+            
             msg += '\n💡 Напиши "добави source" за да създадеш нов!';
-
+            
             await ctx.reply(msg, { parse_mode: 'Markdown' });
             return;
         }
@@ -736,7 +811,7 @@ bot.on('text', async (ctx) => {
         // НОВА ФУНКЦИЯ: Изтрий data source
         if (lowerMessage.includes('изтрий source')) {
             const sourceName = messageText.split('изтрий source')[1]?.trim();
-
+            
             if (!sourceName) {
                 await ctx.reply('❌ Кажи ми кой source да изтрия. Пример: "изтрий source Валута"');
                 return;
