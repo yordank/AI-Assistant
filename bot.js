@@ -24,23 +24,9 @@ if (TELEGRAM_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
 console.log('==================\n');
 
 // ==================== SMART DATA SOURCES ====================
-// Автоматични data sources - САМО за данни които НЕ изискват API discovery
-const DATA_SOURCES = {
-    weather: {
-        keywords: ['време', 'weather', 'температура', 'дъжд'],
-        fetch: async (location = 'Plovdiv') => {
-            try {
-                const response = await axios.get(`https://wttr.in/${location}?format=j1`, { timeout: 10000 });
-                const data = response.data.current_condition[0];
-                return `🌤️ Време в ${location}:\nТемпература: ${data.temp_C}°C\nУсещане: ${data.FeelsLikeC}°C\n${data.weatherDesc[0].value}`;
-            } catch (error) {
-                console.error('Weather API error:', error.message);
-                throw error;
-            }
-        },
-        builtin: true
-    },
-};
+// НЯМА вградени data sources - всичко е автоматично!
+const DATA_SOURCES = {};
+
 
 // Динамични data sources (създадени от потребителя)
 const customDataSources = {};
@@ -137,126 +123,216 @@ async function chatWithAI(userId, message) {
 
         const history = conversations.get(userId);
 
-        // Провери дали въпросът изисква live данни
-        const needsLiveData = message.toLowerCase().match(/цена|price|курс|какъв е|колко е|сега|в момента|актуален|текущ|bitcoin|ethereum|doge|dogecoin|крипто|coin/);
+        console.log(`\n💬 User question: ${message.substring(0, 100)}...`);
+
+        // СТЪПКА 1: Питай Claude дали въпросът изисква live/актуални данни
+        const analysisPrompt = `Анализирай този въпрос: "${message}"
+
+Нуждае ли се от АКТУАЛНИ/LIVE данни за да бъде отговорен точно?
+
+Отговори САМО с ДА или НЕ:
+
+ДА - ако въпросът иска:
+- Текущи цени (крипто, акции, стоки)
+- Актуални курсове  
+- Времето СЕГА
+- Новини/обяви ОТ ДНЕС
+- "Какво се случва", "последно", "сега", "в момента"
+- Конкретна информация която се променя често
+
+НЕ - ако въпросът иска:
+- Обща информация
+- Исторически факти
+- Обяснения как работи нещо
+- Съвети и препоръки
+- Разговор/чат
+
+Пример:
+"Каква е цената на биткойн?" → ДА
+"Как работи биткойн?" → НЕ
+"Дай ми новините" → ДА
+"Какво мислиш за новините?" → НЕ
+"Време в Пловдив" → ДА
+"Кога е най-хубаво време за почивка" → НЕ
+
+Отговори само с ДА или НЕ!`;
+
+        let needsData = false;
         
+        try {
+            const analysisResponse = await anthropic.messages.create({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 10,
+                messages: [{ role: 'user', content: analysisPrompt }]
+            });
+
+            const analysisResult = analysisResponse.content[0].text.trim().toUpperCase();
+            needsData = analysisResult.includes('ДА');
+            
+            console.log(`🤖 Claude analysis: Needs live data? ${needsData ? 'YES ✅' : 'NO ❌'}`);
+            
+        } catch (analysisError) {
+            console.log(`⚠️ Analysis failed, assuming no live data needed`);
+            needsData = false;
+        }
+
         let enhancedMessage = message;
         
-        if (needsLiveData) {
-            console.log('🔍 Question needs live data, attempting intelligent API discovery...');
+        // СТЪПКА 2: Ако трябват данни - намери автоматично API или RSS
+        if (needsData) {
+            console.log('🔍 Live data needed, starting automatic discovery...');
             
-            // Стъпка 1: Опитай базовите вградени sources
+            // Първо опитай вградените sources (weather)
             let liveData = await getRelevantData(message);
             
-            // Стъпка 2: Ако няма данни - използвай AI API Discovery
+            // Ако няма от вградените - питай Claude какъв тип данни трябват
             if (!liveData || liveData.trim().length === 0) {
-                console.log('🤖 No built-in data found, using Claude API discovery...');
+                console.log('🤖 Asking Claude what type of data is needed...');
                 
-                // Питай Claude кой API да използваме
-                const apiDiscoveryPrompt = `Анализирай този въпрос: "${message}"
+                const typePrompt = `За въпроса: "${message}"
 
-Потребителят иска актуални данни. Намери НАЙ-ДОБРИЯ безплатен API за това.
+Какъв ТИП данни са нужни?
 
-Отговори САМО във формат:
+Отговори САМО с един от:
+- API (за цени, курсове, цифрови данни)
+- RSS (за новини, обяви, статии)
+- BOTH (за комбинация)
 
-API_FOUND
-Type: [какви данни - напр. "Dogecoin цена", "курс EUR/BGN"]
-API_Name: [име на API - напр. "CoinGecko", "ExchangeRate API"]
-URL: [ТОЧЕН URL който да извикам - с параметри]
-Keywords: [дума1, дума2, дума3]
+Примери:
+"Цена на биткойн" → API
+"Новини от България" → RSS
+"Нови обяви за апартаменти" → RSS
+"Курс на евро" → API
+"Какво се случва в света" → RSS
 
-Примери за популярни APIs:
-- Крипто: CoinGecko API - https://api.coingecko.com/api/v3/simple/price?ids=dogecoin&vs_currencies=usd,eur
-- Валути: ExchangeRate API - https://api.exchangerate-api.com/v4/latest/USD
-- Акции: Alpha Vantage (изисква key)
-
-ВАЖНО: URL-ът трябва да е готов за извикване ВЕДНАГА (с параметри)!`;
+Отговори само с: API, RSS или BOTH`;
 
                 try {
-                    const discoveryResponse = await anthropic.messages.create({
+                    const typeResponse = await anthropic.messages.create({
                         model: 'claude-sonnet-4-20250514',
-                        max_tokens: 500,
-                        messages: [{ role: 'user', content: apiDiscoveryPrompt }]
+                        max_tokens: 10,
+                        messages: [{ role: 'user', content: typePrompt }]
                     });
 
-                    const discoveryResult = discoveryResponse.content[0].text;
+                    const dataType = typeResponse.content[0].text.trim().toUpperCase();
+                    console.log(`📊 Data type needed: ${dataType}`);
                     
-                    if (discoveryResult.includes('API_FOUND')) {
-                        const apiInfo = parseAPIDiscovery(discoveryResult);
+                    // Опитай RSS ако е подходящ
+                    if (dataType.includes('RSS') || dataType.includes('BOTH')) {
+                        console.log('📰 Attempting intelligent RSS...');
                         
-                        if (apiInfo && apiInfo.url) {
-                            console.log(`✨ Claude found API: ${apiInfo.api} - ${apiInfo.url}`);
+                        try {
+                            const rssResult = await intelligentRSS(message, anthropic);
                             
-                            // Извикай API-то
-                            try {
-                                const apiResponse = await axios.get(apiInfo.url, { timeout: 10000 });
-                                const apiData = JSON.stringify(apiResponse.data, null, 2);
-                                
-                                liveData = `\n🆕 ${apiInfo.type} (от ${apiInfo.api}):\n${apiData.substring(0, 1500)}\n`;
-                                console.log('✅ API call successful, data retrieved');
-                                
-                                // Запази API-то за бъдещо използване
-                                const sourceName = apiInfo.type.replace(/[^a-zA-Z0-9]/g, '_');
-                                customDataSources[sourceName] = {
-                                    keywords: apiInfo.keywords,
-                                    url: apiInfo.url,
-                                    label: `🔄 ${apiInfo.type}`,
-                                    autoAdded: true,
-                                    addedAt: new Date().toISOString()
-                                };
-                                console.log(`💾 Saved API for future use: ${sourceName}`);
-                                
-                            } catch (apiError) {
-                                console.log(`⚠️ API call failed: ${apiError.message}`);
+                            if (rssResult.success) {
+                                console.log(`✅ RSS success: ${rssResult.source}`);
+                                liveData = rssResult.data;
+                            } else {
+                                console.log(`⚠️ RSS failed: ${rssResult.error}`);
                             }
+                        } catch (rssError) {
+                            console.log(`⚠️ RSS error: ${rssError.message}`);
                         }
                     }
-                } catch (discoveryError) {
-                    console.log(`⚠️ API discovery failed: ${discoveryError.message}`);
+                    
+                    // Опитай API ако е подходящ И ако RSS не работи
+                    if ((dataType.includes('API') || dataType.includes('BOTH')) && (!liveData || liveData.trim().length === 0)) {
+                        console.log('🔌 Attempting intelligent API discovery...');
+                        
+                        const apiPrompt = `За въпроса: "${message}"
+
+Намери НАЙ-ДОБРИЯ безплатен API.
+
+Отговори във формат:
+
+API_FOUND
+Type: [описание на данните]
+API_Name: [име на API]
+URL: [точен URL с параметри]
+Keywords: [дума1, дума2, дума3]
+
+Популярни безплатни APIs:
+- Крипто: https://api.coingecko.com/api/v3/simple/price?ids=[coin]&vs_currencies=usd,eur,bgn
+- Валути: https://api.exchangerate-api.com/v4/latest/[currency]
+- Време: https://wttr.in/[location]?format=j1
+
+ВАЖНО: URL трябва да е готов за извикване директно!`;
+
+                        try {
+                            const apiResponse = await anthropic.messages.create({
+                                model: 'claude-sonnet-4-20250514',
+                                max_tokens: 500,
+                                messages: [{ role: 'user', content: apiPrompt }]
+                            });
+
+                            const apiResult = apiResponse.content[0].text;
+                            
+                            if (apiResult.includes('API_FOUND')) {
+                                const apiInfo = parseAPIDiscovery(apiResult);
+                                
+                                if (apiInfo && apiInfo.url) {
+                                    console.log(`✨ API found: ${apiInfo.api} - ${apiInfo.url}`);
+                                    
+                                    try {
+                                        const apiData = await axios.get(apiInfo.url, { timeout: 10000 });
+                                        liveData = `\n🔄 ${apiInfo.type} (${apiInfo.api}):\n${JSON.stringify(apiData.data, null, 2).substring(0, 1500)}\n`;
+                                        console.log('✅ API call successful');
+                                        
+                                        // Запази за бъдещо използване
+                                        const sourceName = apiInfo.type.replace(/[^a-zA-Z0-9]/g, '_');
+                                        customDataSources[sourceName] = {
+                                            keywords: apiInfo.keywords,
+                                            url: apiInfo.url,
+                                            label: `🔄 ${apiInfo.type}`,
+                                            autoAdded: true,
+                                            addedAt: new Date().toISOString()
+                                        };
+                                        console.log(`💾 Saved for future: ${sourceName}`);
+                                        
+                                    } catch (apiError) {
+                                        console.log(`⚠️ API failed: ${apiError.message}`);
+                                    }
+                                }
+                            }
+                        } catch (apiDiscoveryError) {
+                            console.log(`⚠️ API discovery error: ${apiDiscoveryError.message}`);
+                        }
+                    }
+                    
+                } catch (typeError) {
+                    console.log(`⚠️ Type detection error: ${typeError.message}`);
                 }
             }
             
+            // Ако имаме данни - добави ги към контекста
             if (liveData && liveData.trim().length > 0) {
-                // ИМА live данни - добави ги към въпроса
                 console.log('✅ Live data found, adding to context');
-                enhancedMessage = `${message}\n\n📊 Актуални данни (${new Date().toLocaleString('bg-BG')}):\n${liveData}\n\nОтговори на въпроса използвайки тези актуални данни. Ако данните са в JSON формат, извлечи нужната информация и представи я ясно.`;
+                enhancedMessage = `${message}\n\n📊 Актуални данни:\n${liveData}\n\nИзползвай тези данни за точен отговор. Ако са JSON, извлечи нужното и представи ясно.`;
             } else {
-                // НЯМА live данни - дай инструкция на Claude да предложи решения
-                console.log('⚠️ No live data available, instructing Claude to suggest solutions');
-                enhancedMessage = `${message}\n\n⚠️ НЕ успях да намеря автоматично API за тази информация.
+                console.log('⚠️ No data found, will suggest manual alternatives');
+                enhancedMessage = `${message}\n\n⚠️ Не успях да намеря автоматично API/RSS за това.
 
-Отговори така:
+Предложи на потребителя:
+1. Конкретни сайтове където може да провери
+2. Как да създаде автоматична задача (напиши "добави задача")
 
-"За [това което питат] можеш да:
-
-🌐 Провериш на:
-• [конкретен сайт 1]
-• [конкретен сайт 2]
-
-⏰ ИЛИ създай автоматична задача:
-
-Напиши 'добави задача', после:
-
-Задача: [име]
-Интервал: [минути]
-Действие: [какво да проверявам]
-
-И аз ще ти проверявам автоматично!"`;
+Бъди полезен и конкретен!`;
             }
+        } else {
+            console.log('💭 Regular conversational question, no data needed');
         }
 
-        // Добави съобщението (enhanced version)
+        // Добави в историята
         history.push({
             role: 'user',
             content: enhancedMessage
         });
 
-        // Пази само последните 20 съобщения
         if (history.length > 20) {
             conversations.set(userId, history.slice(-20));
         }
 
-        // Извикай Claude
+        // Извикай Claude за отговор
         const response = await anthropic.messages.create({
             model: 'claude-sonnet-4-20250514',
             max_tokens: 2000,
@@ -265,17 +341,17 @@ Keywords: [дума1, дума2, дума3]
 
         const aiResponse = response.content[0].text;
 
-        // Добави отговора в историята
         history.push({
             role: 'assistant',
             content: aiResponse
         });
 
+        console.log(`✅ Response generated\n`);
         return aiResponse;
 
     } catch (error) {
         console.error('AI грешка:', error);
-        return `❌ Грешка при AI: ${error.message}\n\nПровери дали API ключът е правилен.`;
+        return `❌ Грешка при AI: ${error.message}`;
     }
 }
 
