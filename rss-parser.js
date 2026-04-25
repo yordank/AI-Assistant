@@ -147,6 +147,7 @@ async function parseRSS(rssUrl) {
 /**
  * ИНТЕЛИГЕНТЕН RSS SCRAPER
  * Claude избира сайта и намира RSS автоматично
+ * Ако RSS липсва - скрейпва заглавията директно
  */
 async function intelligentRSS(taskDescription, anthropicClient) {
     try {
@@ -158,15 +159,13 @@ async function intelligentRSS(taskDescription, anthropicClient) {
 Коя е НАЙ-ДОБРАТА българска уебсайт за тази информация?
 
 Отговори САМО във формат:
-WEBSITE: [точен URL на главната страница, напр. https://www.imot.bg или https://www.dir.bg]
+WEBSITE: [точен URL на главната страница, напр. https://www.dnes.bg или https://www.dir.bg]
 
 Примери:
-- За имоти → https://www.imot.bg
+- За новини България → https://www.dnes.bg, https://www.dir.bg, https://www.24chasa.bg
 - За работа → https://www.jobs.bg
-- За новини → https://www.dir.bg, https://www.dnes.bg
+- За имоти → https://www.imot.bg
 - За автомобили → https://www.mobile.bg
-- За рецепти → https://www.gotvach.bg
-- За технологии → https://www.pcworld.bg
 
 Избери САМО 1 сайт - най-популярния!`;
 
@@ -189,40 +188,104 @@ WEBSITE: [точен URL на главната страница, напр. https
         const websiteUrl = websiteMatch[1].trim();
         console.log(`🎯 Claude selected: ${websiteUrl}`);
         
-        // Стъпка 2: Намери RSS feed автоматично
+        // Стъпка 2: Опитай да намериш RSS feed
         const rssUrl = await discoverRSS(websiteUrl);
         
-        if (!rssUrl) {
-            return {
-                success: false,
-                error: `Не намирам RSS feed за ${websiteUrl}`,
-                suggestion: `Опитай да посетиш ${websiteUrl} директно`
-            };
+        if (rssUrl) {
+            // Има RSS - използвай го
+            console.log(`📡 Found RSS: ${rssUrl}`);
+            const rssResult = await parseRSS(rssUrl);
+            
+            if (rssResult.success && rssResult.count > 0) {
+                // Форматирай резултата
+                let formattedResult = `📰 От ${new URL(websiteUrl).hostname}:\n\n`;
+                
+                rssResult.data.slice(0, 5).forEach((item, i) => {
+                    formattedResult += `${i + 1}. ${item.title}\n`;
+                    if (item.link) formattedResult += `   🔗 ${item.link}\n`;
+                    formattedResult += '\n';
+                });
+                
+                return {
+                    success: true,
+                    data: formattedResult,
+                    source: websiteUrl,
+                    rssUrl: rssUrl,
+                    count: rssResult.count
+                };
+            }
         }
         
-        // Стъпка 3: Парсни RSS feed
-        const rssResult = await parseRSS(rssUrl);
+        // Стъпка 3: Няма RSS или RSS фейлва - скрейпни директно
+        console.log('⚠️ No RSS found, falling back to direct scraping...');
         
-        if (!rssResult.success) {
-            return rssResult;
+        try {
+            const scrapeResponse = await axios.get(websiteUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 10000
+            });
+            
+            const $ = cheerio.load(scrapeResponse.data);
+            const items = [];
+            
+            // Опитай няколко често срещани селектора за новини
+            const selectors = [
+                'article h2 a', 'article h3 a', // Article headlines
+                '.news-title a', '.article-title a', // Common class names
+                'h2.title a', 'h3.title a',
+                '.story h2 a', '.story h3 a',
+                'a[href*="/news/"]', 'a[href*="/article/"]' // Links to news
+            ];
+            
+            for (const selector of selectors) {
+                $(selector).each((i, el) => {
+                    if (i < 10) {
+                        const title = $(el).text().trim();
+                        const link = $(el).attr('href');
+                        
+                        if (title && title.length > 10) {
+                            let fullLink = link;
+                            if (link && !link.startsWith('http')) {
+                                const baseUrl = new URL(websiteUrl);
+                                fullLink = baseUrl.origin + (link.startsWith('/') ? '' : '/') + link;
+                            }
+                            
+                            items.push({ title, link: fullLink });
+                        }
+                    }
+                });
+                
+                if (items.length >= 5) break; // Намерихме достатъчно
+            }
+            
+            if (items.length > 0) {
+                console.log(`✅ Scraped ${items.length} headlines`);
+                
+                let formattedResult = `📰 От ${new URL(websiteUrl).hostname} (scraping):\n\n`;
+                
+                items.slice(0, 5).forEach((item, i) => {
+                    formattedResult += `${i + 1}. ${item.title}\n`;
+                    if (item.link) formattedResult += `   🔗 ${item.link}\n`;
+                    formattedResult += '\n';
+                });
+                
+                return {
+                    success: true,
+                    data: formattedResult,
+                    source: websiteUrl,
+                    method: 'scraping',
+                    count: items.length
+                };
+            }
+        } catch (scrapeError) {
+            console.error(`❌ Scraping failed: ${scrapeError.message}`);
         }
         
-        // Форматирай резултата
-        let formattedResult = `📰 Резултати от ${new URL(websiteUrl).hostname}:\n\n`;
-        
-        rssResult.data.slice(0, 5).forEach((item, i) => {
-            formattedResult += `${i + 1}. ${item.title}\n`;
-            if (item.description) formattedResult += `   ${item.description}...\n`;
-            if (item.link) formattedResult += `   🔗 ${item.link}\n`;
-            formattedResult += '\n';
-        });
-        
+        // Нищо не работи
         return {
-            success: true,
-            data: formattedResult,
-            source: websiteUrl,
-            rssUrl: rssUrl,
-            count: rssResult.count
+            success: false,
+            error: `Не мога да извлека данни от ${websiteUrl}`,
+            suggestion: `Опитай да посетиш ${websiteUrl} директно`
         };
         
     } catch (error) {
