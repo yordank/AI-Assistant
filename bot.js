@@ -24,42 +24,19 @@ if (TELEGRAM_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
 console.log('==================\n');
 
 // ==================== SMART DATA SOURCES ====================
-// Автоматични data sources - ботът ги използва когато трябва
+// Автоматични data sources - САМО за данни които НЕ изискват API discovery
 const DATA_SOURCES = {
-    crypto: {
-        keywords: ['bitcoin', 'ethereum', 'btc', 'eth', 'криpto', 'крипто', 'биткойн', 'биткоин', 'цена', 'price'],
-        fetch: async () => {
-            try {
-                console.log('  💰 Fetching crypto prices from CoinGecko...');
-                const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd,eur,bgn&include_24hr_change=true', {
-                    timeout: 10000
-                });
-                const data = response.data;
-                
-                let result = '📊 Криpto цени (live):\n';
-                if (data.bitcoin) {
-                    result += `Bitcoin: $${data.bitcoin.usd.toLocaleString()} (${data.bitcoin.bgn?.toLocaleString() || 'N/A'} лв) `;
-                    result += `[${data.bitcoin.usd_24h_change > 0 ? '+' : ''}${data.bitcoin.usd_24h_change?.toFixed(2)}% 24ч]\n`;
-                }
-                if (data.ethereum) {
-                    result += `Ethereum: $${data.ethereum.usd.toLocaleString()} (${data.ethereum.bgn?.toLocaleString() || 'N/A'} лв) `;
-                    result += `[${data.ethereum.usd_24h_change > 0 ? '+' : ''}${data.ethereum.usd_24h_change?.toFixed(2)}% 24ч]`;
-                }
-                console.log('  ✅ Crypto prices fetched successfully');
-                return result;
-            } catch (error) {
-                console.error('  ❌ Crypto API error:', error.message);
-                throw error;
-            }
-        },
-        builtin: true
-    },
     weather: {
         keywords: ['време', 'weather', 'температура', 'дъжд'],
         fetch: async (location = 'Plovdiv') => {
-            const response = await axios.get(`https://wttr.in/${location}?format=j1`);
-            const data = response.data.current_condition[0];
-            return `🌤️ Време в ${location}:\nТемпература: ${data.temp_C}°C\nУсещане: ${data.FeelsLikeC}°C\n${data.weatherDesc[0].value}`;
+            try {
+                const response = await axios.get(`https://wttr.in/${location}?format=j1`, { timeout: 10000 });
+                const data = response.data.current_condition[0];
+                return `🌤️ Време в ${location}:\nТемпература: ${data.temp_C}°C\nУсещане: ${data.FeelsLikeC}°C\n${data.weatherDesc[0].value}`;
+            } catch (error) {
+                console.error('Weather API error:', error.message);
+                throw error;
+            }
         },
         builtin: true
     },
@@ -161,68 +138,110 @@ async function chatWithAI(userId, message) {
         const history = conversations.get(userId);
 
         // Провери дали въпросът изисква live данни
-        const needsLiveData = message.toLowerCase().match(/цена|price|курс|какъв е|колко е|сега|в момента|актуален|текущ|bitcoin|ethereum|btc|eth|биткойн|крипто/);
+        const needsLiveData = message.toLowerCase().match(/цена|price|курс|какъв е|колко е|сега|в момента|актуален|текущ|bitcoin|ethereum|doge|dogecoin|крипто|coin/);
         
         let enhancedMessage = message;
         
         if (needsLiveData) {
-            console.log('🔍 Question needs live data, fetching...');
+            console.log('🔍 Question needs live data, attempting intelligent API discovery...');
             
-            // Опитай се да вземеш live данни
-            const liveData = await getRelevantData(message);
+            // Стъпка 1: Опитай базовите вградени sources
+            let liveData = await getRelevantData(message);
+            
+            // Стъпка 2: Ако няма данни - използвай AI API Discovery
+            if (!liveData || liveData.trim().length === 0) {
+                console.log('🤖 No built-in data found, using Claude API discovery...');
+                
+                // Питай Claude кой API да използваме
+                const apiDiscoveryPrompt = `Анализирай този въпрос: "${message}"
+
+Потребителят иска актуални данни. Намери НАЙ-ДОБРИЯ безплатен API за това.
+
+Отговори САМО във формат:
+
+API_FOUND
+Type: [какви данни - напр. "Dogecoin цена", "курс EUR/BGN"]
+API_Name: [име на API - напр. "CoinGecko", "ExchangeRate API"]
+URL: [ТОЧЕН URL който да извикам - с параметри]
+Keywords: [дума1, дума2, дума3]
+
+Примери за популярни APIs:
+- Крипто: CoinGecko API - https://api.coingecko.com/api/v3/simple/price?ids=dogecoin&vs_currencies=usd,eur
+- Валути: ExchangeRate API - https://api.exchangerate-api.com/v4/latest/USD
+- Акции: Alpha Vantage (изисква key)
+
+ВАЖНО: URL-ът трябва да е готов за извикване ВЕДНАГА (с параметри)!`;
+
+                try {
+                    const discoveryResponse = await anthropic.messages.create({
+                        model: 'claude-sonnet-4-20250514',
+                        max_tokens: 500,
+                        messages: [{ role: 'user', content: apiDiscoveryPrompt }]
+                    });
+
+                    const discoveryResult = discoveryResponse.content[0].text;
+                    
+                    if (discoveryResult.includes('API_FOUND')) {
+                        const apiInfo = parseAPIDiscovery(discoveryResult);
+                        
+                        if (apiInfo && apiInfo.url) {
+                            console.log(`✨ Claude found API: ${apiInfo.api} - ${apiInfo.url}`);
+                            
+                            // Извикай API-то
+                            try {
+                                const apiResponse = await axios.get(apiInfo.url, { timeout: 10000 });
+                                const apiData = JSON.stringify(apiResponse.data, null, 2);
+                                
+                                liveData = `\n🆕 ${apiInfo.type} (от ${apiInfo.api}):\n${apiData.substring(0, 1500)}\n`;
+                                console.log('✅ API call successful, data retrieved');
+                                
+                                // Запази API-то за бъдещо използване
+                                const sourceName = apiInfo.type.replace(/[^a-zA-Z0-9]/g, '_');
+                                customDataSources[sourceName] = {
+                                    keywords: apiInfo.keywords,
+                                    url: apiInfo.url,
+                                    label: `🔄 ${apiInfo.type}`,
+                                    autoAdded: true,
+                                    addedAt: new Date().toISOString()
+                                };
+                                console.log(`💾 Saved API for future use: ${sourceName}`);
+                                
+                            } catch (apiError) {
+                                console.log(`⚠️ API call failed: ${apiError.message}`);
+                            }
+                        }
+                    }
+                } catch (discoveryError) {
+                    console.log(`⚠️ API discovery failed: ${discoveryError.message}`);
+                }
+            }
             
             if (liveData && liveData.trim().length > 0) {
                 // ИМА live данни - добави ги към въпроса
                 console.log('✅ Live data found, adding to context');
-                enhancedMessage = `${message}\n\n📊 Актуални данни (${new Date().toLocaleString('bg-BG')}):\n${liveData}\n\nОтговори на въпроса използвайки тези актуални данни.`;
+                enhancedMessage = `${message}\n\n📊 Актуални данни (${new Date().toLocaleString('bg-BG')}):\n${liveData}\n\nОтговори на въпроса използвайки тези актуални данни. Ако данните са в JSON формат, извлечи нужната информация и представи я ясно.`;
             } else {
                 // НЯМА live данни - дай инструкция на Claude да предложи решения
-                console.log('⚠️ No live data, instructing Claude to suggest solutions');
-                enhancedMessage = `${message}\n\n⚠️ КОНТЕКСТ: Нямаш достъп до актуални данни за този въпрос.
+                console.log('⚠️ No live data available, instructing Claude to suggest solutions');
+                enhancedMessage = `${message}\n\n⚠️ НЕ успях да намеря автоматично API за тази информация.
 
-ИНСТРУКЦИИ как да отговориш:
+Отговори така:
 
-1. **Признай честно** че нямаш live данни в момента
-2. **Предложи КОНКРЕТНИ решения:**
-
-   Формат на отговор:
-   
-   "За [това което питат], можеш да:
-   
-   🌐 Провериш на:
-   • [конкретен сайт 1]
-   • [конкретен сайт 2]
-   • [конкретен сайт 3]
-   
-   ⏰ ИЛИ създай автоматична задача:
-   
-   Напиши 'добави задача', после:
-   
-   Задача: [име]
-   Интервал: [минути]
-   Действие: [какво да проверявам]
-   
-   И аз ще ти проверявам автоматично!"
-
-3. **Бъди полезен и конкретен** - дай точни линкове и примери
-
-Пример за ОТЛИЧЕН отговор:
-"За текущата цена на Bitcoin можеш да:
+"За [това което питат] можеш да:
 
 🌐 Провериш на:
-• coinmarketcap.com
-• binance.com
-• coingecko.com
+• [конкретен сайт 1]
+• [конкретен сайт 2]
 
-⏰ ИЛИ създай задача:
+⏰ ИЛИ създай автоматична задача:
 
 Напиши 'добави задача', после:
 
-Задача: Bitcoin
-Интервал: 15  
-Действие: Провери цената на Bitcoin в USD и лева
+Задача: [име]
+Интервал: [минути]
+Действие: [какво да проверявам]
 
-Ще ти праща update на всеки 15 минути! 🚀"`;
+И аз ще ти проверявам автоматично!"`;
             }
         }
 
@@ -246,7 +265,7 @@ async function chatWithAI(userId, message) {
 
         const aiResponse = response.content[0].text;
 
-        // Добави отговора в историята (само response, без instructions)
+        // Добави отговора в историята
         history.push({
             role: 'assistant',
             content: aiResponse
